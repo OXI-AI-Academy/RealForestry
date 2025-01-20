@@ -2,3 +2,4 @@ streamlit
 pillow
 requests
 wikipedia-api
+wikipedia
