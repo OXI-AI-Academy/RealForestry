@@ -4,9 +4,10 @@ from PIL import Image, ImageDraw
 from datetime import datetime
 import requests
 import wikipedia
-import math
-from ultralytics import YOLO  # For object detection
+import cv2
+import numpy as np
 import os
+import exifread
 
 # Database setup
 DB_PATH = "real_forestry_project.db"
@@ -52,6 +53,22 @@ def create_database():
     conn.commit()
     conn.close()
 
+def extract_metadata(image_path):
+    """Extract focal length and sensor width from image metadata."""
+    focal_length = 50.0  # Default value if metadata is unavailable
+    sensor_width = 36.0  # Default value for full-frame cameras
+
+    try:
+        with open(image_path, 'rb') as img_file:
+            tags = exifread.process_file(img_file, details=False)
+            focal_length_tag = tags.get('EXIF FocalLength')
+            if focal_length_tag:
+                focal_length = float(focal_length_tag.values[0])
+    except Exception as e:
+        st.warning(f"Could not extract metadata: {e}")
+
+    return focal_length, sensor_width
+
 def calculate_tree_dimensions(bbox, focal_length, img_width, img_height):
     """Calculate tree dimensions based on bounding box and image metadata."""
     sensor_width = 36.0  # mm (standard full-frame sensor width)
@@ -70,24 +87,39 @@ def calculate_tree_dimensions(bbox, focal_length, img_width, img_height):
     return round(tree_height / 1000, 2), round(tree_width / 1000, 2), round(crown_size / 1000, 2)
 
 def detect_tree_and_draw_bbox(image_path):
-    """Detect the tree in the image and draw a bounding box."""
-    model = YOLO('yolov8n.pt')  # Load YOLOv8 model
-    results = model(image_path)
+    """Detect the tree in the image and draw a bounding box based on color segmentation."""
+    # Load image using OpenCV
+    image = cv2.imread(image_path)
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-    if results and len(results[0].boxes):
-        boxes = results[0].boxes.xyxy.numpy()  # Extract bounding box coordinates
-        largest_box = max(boxes, key=lambda box: (box[2] - box[0]) * (box[3] - box[1]))  # Largest box
+    # Convert to HSV color space
+    hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
-        # Draw bounding box
-        image = Image.open(image_path)
-        draw = ImageDraw.Draw(image)
-        draw.rectangle(largest_box, outline="red", width=3)
+    # Define range for green color (common for trees)
+    lower_green = np.array([35, 50, 50])
+    upper_green = np.array([85, 255, 255])
+
+    # Create mask for green regions
+    mask = cv2.inRange(hsv_image, lower_green, upper_green)
+
+    # Find contours in the mask
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    if contours:
+        # Get the largest contour (assuming it's the tree)
+        largest_contour = max(contours, key=cv2.contourArea)
+
+        # Get bounding box for the largest contour
+        x, y, w, h = cv2.boundingRect(largest_contour)
+
+        # Draw bounding box on original image
+        cv2.rectangle(image_rgb, (x, y), (x + w, y + h), (255, 0, 0), 3)
 
         # Save the output image with bounding box
         output_path = image_path.replace(".jpg", "_bbox.jpg")
-        image.save(output_path)
+        Image.fromarray(image_rgb).save(output_path)
 
-        return largest_box, output_path
+        return (x, y, x + w, y + h), output_path
     else:
         st.error("No tree detected in the image.")
         return None, None
@@ -102,28 +134,6 @@ def add_image(image_data):
     """, image_data)
     conn.commit()
     conn.close()
-
-def identify_tree(image_path):
-    """Send the image to the Plant.id API for identification."""
-    api_key = "your_api_key_here"  # Replace with your Plant.id API key
-    url = "https://api.plant.id/v2/identify"
-    headers = {"Authorization": f"Bearer {api_key}"}
-
-    with open(image_path, "rb") as image_file:
-        response = requests.post(
-            url,
-            headers=headers,
-            files={"images": image_file},
-            data={"organs": "leaf"}
-        )
-    if response.status_code == 200:
-        result = response.json()
-        species = result["suggestions"][0]["plant_name"]
-        confidence = result["suggestions"][0]["probability"]
-        return species, confidence
-    else:
-        st.error(f"API request failed: {response.status_code} - {response.text}")
-        return None, None
 
 def get_wikipedia_details(tree_name):
     """Fetch details of the tree from Wikipedia."""
@@ -156,15 +166,17 @@ def main():
             f.write(img_data.read())
         st.success(f"Image saved: {img_path}")
 
-        # Step 2: Detect tree and draw bounding box
+        # Extract metadata
+        focal_length, sensor_width = extract_metadata(img_path)
+
+        # Detect tree and draw bounding box
         bounding_box, bbox_img_path = detect_tree_and_draw_bbox(img_path)
         if bounding_box:
             st.image(bbox_img_path, caption="Tree with Bounding Box")
 
-            # Step 3: Calculate tree dimensions
+            # Calculate tree dimensions
             image = Image.open(img_path)
             resolution = image.size
-            focal_length = 50.0  # Assuming default focal length; adjust if metadata is available
 
             tree_height, tree_width, crown_size = calculate_tree_dimensions(bounding_box, focal_length, *resolution)
             st.write("### Calculated Tree Dimensions")
@@ -172,7 +184,7 @@ def main():
             st.write(f"Width: {tree_width} m")
             st.write(f"Crown Size: {crown_size} m²")
 
-            # Step 4: Add data to the database
+            # Save to database
             image_data = (
                 datetime.now().strftime("%Y-%m-%d"),
                 focal_length,
