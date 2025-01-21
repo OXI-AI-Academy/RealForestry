@@ -1,5 +1,9 @@
 streamlit
+ultralytics
 pillow
 requests
 wikipedia-api
-wikipedia
+torch
+torchvision
+opencv-python-headless
+numpy

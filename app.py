@@ -1,10 +1,12 @@
 import streamlit as st
 import sqlite3
-from PIL import Image, ExifTags
-import os
+from PIL import Image, ImageDraw
 from datetime import datetime
 import requests
 import wikipedia
+import math
+from ultralytics import YOLO  # For object detection
+import os
 
 # Database setup
 DB_PATH = "real_forestry_project.db"
@@ -41,6 +43,7 @@ def create_database():
         height INTEGER,
         width INTEGER,
         file_path TEXT UNIQUE,
+        bounding_box TEXT,
         created DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated DATETIME DEFAULT CURRENT_TIMESTAMP
     )
@@ -49,19 +52,57 @@ def create_database():
     conn.commit()
     conn.close()
 
-# Function to add image data to the database
+def calculate_tree_dimensions(bbox, focal_length, img_width, img_height):
+    """Calculate tree dimensions based on bounding box and image metadata."""
+    sensor_width = 36.0  # mm (standard full-frame sensor width)
+    distance_to_tree = 5000.0  # mm (arbitrary distance to the tree)
+
+    if focal_length == 0:  # Prevent division by zero
+        focal_length = 1.0
+
+    bbox_width = bbox[2] - bbox[0]
+    bbox_height = bbox[3] - bbox[1]
+
+    tree_width = (bbox_width / img_width) * (sensor_width / focal_length) * distance_to_tree
+    tree_height = (bbox_height / img_height) * (sensor_width / focal_length) * distance_to_tree
+    crown_size = tree_width * 0.6  # Assume crown size is 60% of tree width
+
+    return round(tree_height / 1000, 2), round(tree_width / 1000, 2), round(crown_size / 1000, 2)
+
+def detect_tree_and_draw_bbox(image_path):
+    """Detect the tree in the image and draw a bounding box."""
+    model = YOLO('yolov8n.pt')  # Load YOLOv8 model
+    results = model(image_path)
+
+    if results and len(results[0].boxes):
+        boxes = results[0].boxes.xyxy.numpy()  # Extract bounding box coordinates
+        largest_box = max(boxes, key=lambda box: (box[2] - box[0]) * (box[3] - box[1]))  # Largest box
+
+        # Draw bounding box
+        image = Image.open(image_path)
+        draw = ImageDraw.Draw(image)
+        draw.rectangle(largest_box, outline="red", width=3)
+
+        # Save the output image with bounding box
+        output_path = image_path.replace(".jpg", "_bbox.jpg")
+        image.save(output_path)
+
+        return largest_box, output_path
+    else:
+        st.error("No tree detected in the image.")
+        return None, None
+
 def add_image(image_data):
     """Add image details to the Images table."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
-    INSERT INTO Images (collection_date, focal_length, height, width, file_path)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO Images (collection_date, focal_length, height, width, file_path, bounding_box)
+    VALUES (?, ?, ?, ?, ?, ?)
     """, image_data)
     conn.commit()
     conn.close()
 
-# Function to identify tree species using Plant.id API
 def identify_tree(image_path):
     """Send the image to the Plant.id API for identification."""
     api_key = "your_api_key_here"  # Replace with your Plant.id API key
@@ -77,7 +118,6 @@ def identify_tree(image_path):
         )
     if response.status_code == 200:
         result = response.json()
-        # Extract the most probable species name and confidence
         species = result["suggestions"][0]["plant_name"]
         confidence = result["suggestions"][0]["probability"]
         return species, confidence
@@ -85,11 +125,9 @@ def identify_tree(image_path):
         st.error(f"API request failed: {response.status_code} - {response.text}")
         return None, None
 
-# Wikipedia function to get tree details
 def get_wikipedia_details(tree_name):
     """Fetch details of the tree from Wikipedia."""
     try:
-        # Add 'tree' to the search term to narrow down results
         tree_name_query = f"{tree_name} tree"
         summary = wikipedia.summary(tree_name_query, sentences=3)
         link = wikipedia.page(tree_name_query).url
@@ -97,107 +135,54 @@ def get_wikipedia_details(tree_name):
     except wikipedia.exceptions.DisambiguationError as e:
         st.error(f"Disambiguation error: {e}")
         return None, None
-    except wikipedia.exceptions.HTTPTimeoutError:
-        st.error("Wikipedia request timed out.")
-        return None, None
     except wikipedia.exceptions.PageError:
-        st.error(f"Page for '{tree_name}' not found. Please check the tree name.")
+        st.error(f"Page for '{tree_name}' not found.")
         return None, None
 
-# Streamlit app
 def main():
     st.title("Real Forestry Project")
     st.write("Capture tree data and save it to the database.")
 
-    # Create the database if not already created
     create_database()
 
     # Step 1: Capture or upload an image
     st.header("Capture or Upload Tree Image")
     img_data = st.camera_input("Take a picture of the tree") or st.file_uploader("Or upload an image", type=["jpg", "png", "jpeg"])
 
-    if img_data is not None:
-        # Save the image locally
+    if img_data:
         img_path = os.path.join("images", f"tree_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg")
         os.makedirs("images", exist_ok=True)
         with open(img_path, "wb") as f:
             f.write(img_data.read())
-
         st.success(f"Image saved: {img_path}")
 
-        # Extract EXIF metadata
-        image = Image.open(img_path)
-        exif_data = {}
-        if image._getexif():
-            exif_data = {
-                ExifTags.TAGS[key]: value
-                for key, value in image._getexif().items()
-                if key in ExifTags.TAGS
-            }
-        focal_length = exif_data.get("FocalLength", 0)
-        resolution = (image.size[0], image.size[1])
+        # Step 2: Detect tree and draw bounding box
+        bounding_box, bbox_img_path = detect_tree_and_draw_bbox(img_path)
+        if bounding_box:
+            st.image(bbox_img_path, caption="Tree with Bounding Box")
 
-        # Display image metadata
-        st.write("### Image Metadata")
-        st.write(f"Focal Length: {focal_length} mm")
-        st.write(f"Resolution: {resolution[0]}x{resolution[1]} pixels")
+            # Step 3: Calculate tree dimensions
+            image = Image.open(img_path)
+            resolution = image.size
+            focal_length = 50.0  # Assuming default focal length; adjust if metadata is available
 
-        # Save metadata to the database
-        image_data = (
-            datetime.now().strftime("%Y-%m-%d"),  # collection_date
-            focal_length,                         # focal_length
-            resolution[1],                        # height
-            resolution[0],                        # width
-            img_path                              # file_path
-        )
-        add_image(image_data)
-        st.success("Image metadata saved to the database.")
+            tree_height, tree_width, crown_size = calculate_tree_dimensions(bounding_box, focal_length, *resolution)
+            st.write("### Calculated Tree Dimensions")
+            st.write(f"Height: {tree_height} m")
+            st.write(f"Width: {tree_width} m")
+            st.write(f"Crown Size: {crown_size} m²")
 
-        # Step 2: Identify tree species automatically
-        st.header("Tree Species Identification")
-        species, confidence = identify_tree(img_path)
-
-        if species:
-            st.write(f"**Identified Species:** {species}")
-            st.write(f"**Confidence:** {confidence * 100:.2f}%")
-
-            # Step 3: Add tree details
-            st.header("Add Tree Details")
-            with st.form("tree_form"):
-                year_of_plantation = st.number_input("Year of Plantation", min_value=1900, max_value=datetime.now().year, step=1)
-                location = st.text_area("Location")
-                height = st.number_input("Height (meters)", min_value=0.0, step=0.1)
-                width = st.number_input("Width (meters)", min_value=0.0, step=0.1)
-                crown_size = st.number_input("Crown Size (meters)", min_value=0.0, step=0.1)
-                stem_bark_code = st.text_input("Stem Bark Code (unique)")
-                wikipedia_link = st.text_input("Wikipedia Link")
-
-                submitted = st.form_submit_button("Save Tree Data")
-                if submitted:
-                    tree_data = (
-                        species, year_of_plantation, location, height, width, crown_size,
-                        stem_bark_code, img_path, wikipedia_link
-                    )
-                    conn = sqlite3.connect(DB_PATH)
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                    INSERT INTO Trees (species, year_of_plantation, location, height, width, crown_size, stem_bark_code, images, wikipedia_link)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, tree_data)
-                    conn.commit()
-                    conn.close()
-                    st.success("Tree data saved to the database.")
-
-    # Step 4: Manual Tree Name Entry
-    st.header("Manual Tree Name Entry")
-    manual_tree_name = st.text_input("Enter the tree name")
-
-    if manual_tree_name:
-        # Fetch Wikipedia details for manual tree name entry
-        summary, link = get_wikipedia_details(manual_tree_name)
-        if summary and link:
-            st.write(f"**Tree Details:** {summary}")
-            st.write(f"**Wikipedia Link:** [Click here]({link})")
+            # Step 4: Add data to the database
+            image_data = (
+                datetime.now().strftime("%Y-%m-%d"),
+                focal_length,
+                resolution[1],
+                resolution[0],
+                img_path,
+                str(bounding_box)
+            )
+            add_image(image_data)
+            st.success("Image metadata and bounding box saved to the database.")
 
 if __name__ == "__main__":
     main()
