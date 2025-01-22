@@ -1,6 +1,6 @@
 import streamlit as st
 import sqlite3
-from PIL import Image, ImageDraw, ExifTags
+from PIL import Image, ExifTags
 from datetime import datetime
 import cv2
 import numpy as np
@@ -21,7 +21,6 @@ def create_database():
         species TEXT,
         height REAL,
         width REAL,
-        crown_size REAL,
         focal_length REAL,
         image_path TEXT UNIQUE,
         created DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -40,47 +39,60 @@ def extract_focal_length(image_path):
     except Exception:
         return 50.0  # Default focal length if EXIF data is unavailable
 
-def detect_tree_and_validate(image_path):
-    """Detect the tree and validate if the full tree is in the frame."""
+def validate_tree_centering(bbox, img_width, img_height):
+    """Validate if the tree is centered with space around the edges."""
+    x_min, y_min, x_max, y_max = bbox
+    space_threshold = 0.1  # At least 10% space on all sides
+    left_space = x_min / img_width
+    right_space = (img_width - x_max) / img_width
+    top_space = y_min / img_height
+    bottom_space = (img_height - y_max) / img_height
+
+    return all(space >= space_threshold for space in [left_space, right_space, top_space, bottom_space])
+
+def process_image(image_path):
+    """Process the image: draw guidelines, blur background, and validate centering."""
     image = cv2.imread(image_path)
     height, width, _ = image.shape
 
-    # Mock detection logic (replace with YOLO or similar model)
-    bbox = [50, 50, width - 50, height - 50]  # Simulate bounding box in the center
-    valid = bbox[0] >= 0 and bbox[1] >= 0 and bbox[2] <= width and bbox[3] <= height
+    # Mock tree detection (replace with real detection logic if needed)
+    bbox = [int(width * 0.2), int(height * 0.1), int(width * 0.8), int(height * 0.9)]  # Tree in the center
 
-    # Draw bounding box and guidelines
-    cv2.rectangle(image, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (0, 255, 0), 2)
-    cv2.line(image, (width // 2, 0), (width // 2, height), (0, 255, 0), 1)  # Vertical
-    cv2.line(image, (0, height // 2), (width, height // 2), (0, 255, 0), 1)  # Horizontal
+    # Validate tree centering
+    is_centered = validate_tree_centering(bbox, width, height)
 
+    # Draw guidelines
+    cv2.line(image, (width // 2, 0), (width // 2, height), (0, 255, 0), 2)  # Vertical
+    cv2.line(image, (0, height // 2), (width, height // 2), (0, 255, 0), 2)  # Horizontal
+
+    # Blur background
+    mask = np.zeros((height, width), dtype=np.uint8)
+    cv2.rectangle(mask, (bbox[0], bbox[1]), (bbox[2], bbox[3]), 255, -1)
+    blurred = cv2.GaussianBlur(image, (51, 51), 30)
+    image = np.where(mask[:, :, None] == 255, image, blurred)
+
+    # Calculate tree dimensions
+    tree_width = (bbox[2] - bbox[0]) / width * 100  # Width as percentage of image width
+    tree_height = (bbox[3] - bbox[1]) / height * 100  # Height as percentage of image height
+
+    # Annotate dimensions
+    cv2.putText(image, f"Height: {tree_height:.2f}% of image", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    cv2.putText(image, f"Width: {tree_width:.2f}% of image", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+
+    # Save processed image
     processed_image_path = image_path.replace(".jpg", "_processed.jpg")
     cv2.imwrite(processed_image_path, image)
 
-    return valid, bbox, processed_image_path
+    return is_centered, tree_height, tree_width, processed_image_path
 
-def calculate_tree_dimensions(bbox, focal_length, img_width, img_height):
-    """Calculate tree dimensions based on bounding box and image metadata."""
-    sensor_width = 36.0  # mm (full-frame sensor width)
-    distance_to_tree = 5000.0  # mm (arbitrary distance)
-
-    bbox_width = bbox[2] - bbox[0]
-    bbox_height = bbox[3] - bbox[1]
-
-    tree_width = (bbox_width / img_width) * (sensor_width / focal_length) * distance_to_tree
-    tree_height = (bbox_height / img_height) * (sensor_width / focal_length) * distance_to_tree
-    crown_size = tree_width * 0.6  # Assume crown size is 60% of tree width
-
-    return round(tree_height / 1000, 2), round(tree_width / 1000, 2), round(crown_size / 1000, 2)
-
-def save_tree_to_database(species, height, width, crown_size, focal_length, image_path):
+def save_tree_to_database(species, height, width, focal_length, image_path):
     """Save tree details to the database."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
-    INSERT INTO Trees (species, height, width, crown_size, focal_length, image_path)
-    VALUES (?, ?, ?, ?, ?, ?)
-    """, (species, height, width, crown_size, focal_length, image_path))
+    INSERT INTO Trees (species, height, width, focal_length, image_path)
+    VALUES (?, ?, ?, ?, ?)
+    """, (species, height, width, focal_length, image_path))
     conn.commit()
     conn.close()
 
@@ -104,26 +116,21 @@ def main():
         # Extract focal length
         focal_length = extract_focal_length(img_path)
 
-        # Detect tree and validate
-        valid, bbox, processed_image_path = detect_tree_and_validate(img_path)
-        if not valid:
-            st.error("Invalid image: Ensure the entire tree is within the frame.")
+        # Process image
+        is_centered, tree_height, tree_width, processed_image_path = process_image(img_path)
+
+        if not is_centered:
+            st.error("Invalid image: Ensure the tree is centered with space on all sides.")
             return
 
-        st.image(processed_image_path, caption="Processed Image with Bounding Box and Guidelines")
-
-        # Calculate tree dimensions
-        image = Image.open(img_path)
-        tree_height, tree_width, crown_size = calculate_tree_dimensions(bbox, focal_length, *image.size)
-
-        st.write(f"**Tree Height:** {tree_height} meters")
-        st.write(f"**Tree Width:** {tree_width} meters")
-        st.write(f"**Crown Size:** {crown_size} meters")
+        st.image(processed_image_path, caption="Processed Image with Dimensions and Guidelines")
+        st.write(f"**Tree Height:** {tree_height:.2f}% of image height")
+        st.write(f"**Tree Width:** {tree_width:.2f}% of image width")
 
         # Save tree details to database
         species = st.text_input("Enter tree species (optional):", value="Unknown Species")
         if st.button("Save to Database"):
-            save_tree_to_database(species, tree_height, tree_width, crown_size, focal_length, processed_image_path)
+            save_tree_to_database(species, tree_height, tree_width, focal_length, processed_image_path)
             st.success("Tree data saved successfully!")
 
 if __name__ == "__main__":
