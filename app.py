@@ -53,8 +53,22 @@ def process_image_with_validation(image_path):
     image = cv2.imread(image_path)
     height, width, _ = image.shape
 
-    # Mock detection logic (replace with real detection logic using YOLO or similar)
-    bbox = [int(width * 0.2), int(height * 0.1), int(width * 0.8), int(height * 0.9)]  # Mocked bounding box
+    # Convert to HSV for color-based segmentation
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    green_lower = np.array([25, 40, 40])  # Adjust based on tree color range
+    green_upper = np.array([85, 255, 255])
+    mask = cv2.inRange(hsv, green_lower, green_upper)
+
+    # Find contours
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    if not contours:
+        return False, "No tree detected in the image. Please recapture.", None
+
+    # Get the largest contour (assume it's the tree)
+    largest_contour = max(contours, key=cv2.contourArea)
+    x, y, w, h = cv2.boundingRect(largest_contour)
+    bbox = [x, y, x + w, y + h]
 
     # Validate centering
     is_centered = validate_tree_centering(bbox, width, height)
