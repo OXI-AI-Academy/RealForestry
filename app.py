@@ -96,12 +96,18 @@ def save_tree_to_database(species, height, width, focal_length, image_path):
 
 def main():
     st.title("Tree Capture and Measurement")
-    st.write("Capture a tree image, validate its presence, and measure its dimensions.")
+    st.write("Capture or upload a tree image, validate its presence, and measure its dimensions.")
 
     create_database()
 
     st.header("Capture or Upload Tree Image")
-    img_data = st.camera_input("Take a picture of the tree")
+    capture_or_upload = st.radio("Choose an option:", ["Capture using Camera", "Upload an Image"])
+
+    img_data = None
+    if capture_or_upload == "Capture using Camera":
+        img_data = st.camera_input("Take a picture of the tree")
+    elif capture_or_upload == "Upload an Image":
+        img_data = st.file_uploader("Upload a tree image", type=["jpg", "jpeg", "png"])
 
     if img_data:
         # Save uploaded image
