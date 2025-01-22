@@ -2,8 +2,8 @@ import streamlit as st
 import sqlite3
 from PIL import Image, ImageDraw
 from datetime import datetime
-import wikipedia
 import os
+import numpy as np
 
 # Database setup
 DB_PATH = "real_forestry_project.db"
@@ -49,16 +49,39 @@ def create_database():
     conn.commit()
     conn.close()
 
-def detect_tree_and_draw_bbox(image_path):
-    """Detect the tree in the image and draw a bounding box."""
-    # Replace with an actual detection model for better results
-    bbox = [20, 20, 250, 450]  # Mocked bounding box
+def draw_guidelines(image_path):
+    """Draw vertical and horizontal guidelines on the image."""
     image = Image.open(image_path)
     draw = ImageDraw.Draw(image)
+    width, height = image.size
+
+    # Draw vertical and horizontal center lines
+    draw.line([(width // 2, 0), (width // 2, height)], fill="green", width=2)  # Vertical
+    draw.line([(0, height // 2), (width, height // 2)], fill="green", width=2)  # Horizontal
+
+    guideline_path = image_path.replace(".jpg", "_guidelines.jpg")
+    image.save(guideline_path)
+    return guideline_path
+
+def detect_tree_and_validate(image_path):
+    """Detect the tree and validate if the full tree is in the frame."""
+    # Mock detection: Replace this with an actual detection algorithm
+    bbox = [50, 50, 450, 800]  # Mocked bounding box
+
+    image = Image.open(image_path)
+    width, height = image.size
+
+    # Check if the tree is fully captured
+    if bbox[0] <= 0 or bbox[1] <= 0 or bbox[2] >= width or bbox[3] >= height:
+        return False, bbox  # Tree is not fully within the frame
+
+    # Draw bounding box on the image
+    draw = ImageDraw.Draw(image)
     draw.rectangle(bbox, outline="red", width=3)
-    output_path = image_path.replace(".jpg", "_bbox.jpg")
-    image.save(output_path)
-    return bbox, output_path
+    bbox_img_path = image_path.replace(".jpg", "_bbox.jpg")
+    image.save(bbox_img_path)
+
+    return True, (bbox, bbox_img_path)
 
 def calculate_tree_dimensions(bbox, focal_length, img_width, img_height):
     """Calculate tree dimensions based on bounding box and image metadata."""
@@ -74,46 +97,9 @@ def calculate_tree_dimensions(bbox, focal_length, img_width, img_height):
 
     return round(tree_height / 1000, 2), round(tree_width / 1000, 2), round(crown_size / 1000, 2)
 
-def get_wikipedia_details(tree_name):
-    """Fetch details of the tree from Wikipedia."""
-    try:
-        tree_name_query = f"{tree_name} tree"
-        search_results = wikipedia.search(tree_name_query)
-        if not search_results:
-            return None, None
-
-        page_title = search_results[0]
-        summary = wikipedia.summary(page_title, sentences=3)
-        link = wikipedia.page(page_title).url
-        return summary, link
-    except:
-        return None, None
-
-def add_tree_to_database(tree_data):
-    """Add tree details to the database."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-    INSERT INTO Trees (species, year_of_plantation, location, height, width, crown_size, stem_bark_code, images, wikipedia_link)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, tree_data)
-    conn.commit()
-    conn.close()
-
-def add_image_to_database(image_data):
-    """Add image details to the database."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-    INSERT INTO Images (collection_date, focal_length, height, width, file_path, bounding_box)
-    VALUES (?, ?, ?, ?, ?, ?)
-    """, image_data)
-    conn.commit()
-    conn.close()
-
 def main():
-    st.title("Real Forestry Project")
-    st.write("Capture tree data and save it to the database.")
+    st.title("Tree Detection and Measurement")
+    st.write("Ensure the tree is fully captured with the help of guidelines.")
 
     create_database()
 
@@ -127,39 +113,26 @@ def main():
             f.write(img_data.read())
         st.success(f"Image saved: {img_path}")
 
-        bounding_box, bbox_img_path = detect_tree_and_draw_bbox(img_path)
+        # Draw guidelines
+        guideline_img_path = draw_guidelines(img_path)
+        st.image(guideline_img_path, caption="Image with Guidelines")
+
+        # Detect tree and validate
+        valid, detection_data = detect_tree_and_validate(img_path)
+        if not valid:
+            st.error("Invalid image: Ensure the entire tree is within the frame.")
+            return
+
+        bbox, bbox_img_path = detection_data
         st.image(bbox_img_path, caption="Tree with Bounding Box")
 
+        # Calculate dimensions
         image = Image.open(img_path)
         focal_length = 50.0
-        tree_height, tree_width, crown_size = calculate_tree_dimensions(bounding_box, focal_length, *image.size)
+        tree_height, tree_width, crown_size = calculate_tree_dimensions(bbox, focal_length, *image.size)
         st.write(f"Tree Height: {tree_height} meters")
         st.write(f"Tree Width: {tree_width} meters")
         st.write(f"Crown Size: {crown_size} meters")
-
-        add_image_to_database((datetime.now().date(), focal_length, *image.size, img_path, str(bounding_box)))
-
-    st.header("Provide Tree Details")
-    species = st.text_input("Enter the tree species:")
-    if st.button("Save to Database"):
-        summary, wiki_link = get_wikipedia_details(species)
-        tree_data = (
-            species,
-            datetime.now().year,
-            "Unknown Location",
-            tree_height,
-            tree_width,
-            crown_size,
-            f"Stem{datetime.now().strftime('%Y%m%d%H%M%S')}",
-            bbox_img_path,
-            wiki_link
-        )
-        add_tree_to_database(tree_data)
-        st.success("Tree data saved.")
-        if summary:
-            st.write("### Wikipedia Information")
-            st.write(summary)
-            st.write(f"[Read more on Wikipedia]({wiki_link})")
 
 if __name__ == "__main__":
     main()
